@@ -23,9 +23,9 @@ Output_Log_Distribution/
 │   ├── HumanEval/                       # HumanEval dataset results
 │   └── OpencodeInstruct/                # OpenCodeInstruct dataset results
 ├── Result_Mutation/                      # Results from synonym-substituted prompt experiments
-│   ├── HumanEval/                       # HumanEval dataset results
-│   └── OpencodeInstruct/                # OpenCodeInstruct dataset results
-└── ReAPR-dataset/                        # ReAPR dataset files
+    ├── HumanEval/                       # HumanEval dataset results
+    └── OpencodeInstruct/                # OpenCodeInstruct dataset results
+
 ```
 
 ## Features
