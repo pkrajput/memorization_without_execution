@@ -13,7 +13,7 @@ except ValueError:
     DEFAULT_REQUEST_TIMEOUT = 120.0
 
 client = OpenAI(
-    api_key="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",
+    api_key=os.environ.get("OPENAI_API_KEY"),
     max_retries=3,
     timeout=DEFAULT_REQUEST_TIMEOUT,
 )
