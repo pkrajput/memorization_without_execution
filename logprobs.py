@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-OpenAI Code Generator (single-threaded) with optional prompt fuzzing
+Code Generator with optional prompt fuzzing
 and chosen-token probabilities.
 
 Supports multiple JSONL dataset formats (CodeContests, BigO-Bench, Humaneval).
@@ -11,11 +11,10 @@ What this script does:
   1) Loads a JSONL dataset (format chosen by --dataset or auto).
   2) For each problem, generates K independent solutions using an OpenAI chat model.
   3) Optionally perturbs (fuzzes) the prompt via synonym substitution before generation
-     (not used for Humaneval).
   4) Writes one JSONL row per completion to --output.
 
 Each output row includes:
-  - problem_id (guaranteed)
+  - problem_id
   - solution_id, completion_index
   - original description
   - fuzzed_description (if fuzzing changed it)
@@ -24,18 +23,6 @@ Each output row includes:
   - token_probs: compact list of chosen tokens and their probabilities
   - dataset (as passed)
   - dataset-specific metadata when available
-
-No concurrency:
-  This version runs sequentially to avoid rate-limit cascades and make debugging simpler.
-
-External dependencies:
-  Required:
-    - openai
-    - tqdm
-  Optional (only if --prompt-fuzzing is provided):
-    - spacy
-    - nltk
-    - synonym_substitution_standalone.py (your module)
 
 Important:
   - No installs/downloads happen inside this script.
@@ -593,10 +580,6 @@ def main():
                 if key in completed_problem_keys:
                     pbar.update(1)
                     continue
-
-                if args.dataset == "humaneval":
-                    # No synonym fuzzing for code-only Humaneval prompts
-                    fuzzed_desc = original_desc
                 else:
                     fuzzed_desc = maybe_fuzz_description(
                         description=original_desc,
