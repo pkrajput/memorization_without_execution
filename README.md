@@ -1,217 +1,315 @@
-# Output Log Distribution Analysis
+# Logprobs + Dynamic Stability Fuzzing Pipeline
 
-This directory contains tools and scripts for analyzing log probabilities and perplexity metrics in code generation tasks. The main focus is on comparing code generation quality between original prompts and synonym-substituted prompts using the HumanEval dataset.
+This repo contains a small pipeline for studying how **input fuzzing** (synonym substitution) affects:
 
-## Overview
+- Token-level **log probability distributions**
+- **Static** opcode stability (SCTD)
+- **Dynamic** opcode stability (DCTD)
+- **Pass rates** across code benchmarks
 
-This project evaluates the impact of input perturbation (synonym substitution) on code generation metrics, specifically:
-- **Mean Log Probability**: Average log probability of generated tokens
-- **Perplexity**: Exponential of negative mean log probability
-- **Test Pass Rate**: Whether generated code passes the test cases
+The pipeline supports **three datasets** via a common flag:
 
-## Project Structure
+- `humaneval`
+- `codecontests`
+- `bigobench`
 
+---
+
+## High-Level Pipeline
+
+For each dataset + fuzz setting, the workflow is:
+
+1. **Generate model samples + logprobs** with `logprobs.py`
+2. **Tag solutions as public-pass / fail** with `unittests/run_public_unittests_and_tag.sh`
+3. **Compute SCTD/DCTD metrics** with `dynamic_stability/run_fuzz_metrics_unittested.sh`
+4. **Plot SCTD/DCTD + logprob distributions** with `plot_sctd_dctd_and_logprobs_new.py`
+
+All three datasets share this same structure; only the `--dataset` flag and fuzz levels differ.
+
+---
+
+## Repo Structure (key files only)
+
+```text
+.
+├── logprobs.py                       # Main sample generation + logprobs script
+├── calculateLogits.py                # API wrappers + logprob helpers
+├── evaluate_quixbugs_instance.py     # Legacy evaluation helper
+├── synonym_substitution_standalone.py# Synonym-substitution transformer
+
+├── dynamic_stability/
+│   ├── calculate_sctd.py             # Static Canonical Trace Divergence (SCTD)
+│   ├── calculate_dctd.py             # Dynamic Canonical Trace Divergence (DCTD)
+│   ├── produce_dynamic_traces.py     # Unified watchdog driver (bigo/cc/humaneval)
+│   ├── run_fuzz_metrics_unittested.sh# Unified fuzz-study driver (bigo/cc/humaneval)
+│   ├── worker_bigo.py                # BigOBench-specific trace worker
+│   ├── worker_cc.py                  # CodeContests-style worker
+│   └── worker_humaneval.py           # HumanEval-style worker
+
+├── unittests/
+│   ├── auto_unit_test.py
+│   ├── unit_test.py
+│   └── run_public_unittests_and_tag.sh   # Tags solutions as public pass/fail
+
+├── plot_sctd_dctd_and_logprobs_new.py    # Plotting (SCTD/DCTD + logprob summaries)
+├── requirements.txt
+└── README.md
 ```
-Output_Log_Distribution/
-├── logprobs.py                           # Main analysis script (converted from notebook)
-├── logprobs.ipynb                        # Original Jupyter notebook
-├── calculateLogits.py                    # Utility functions for API interactions and logprob extraction
-├── evaluate_quixbugs_instance.py         # Code evaluation and testing utilities
-├── synonym_substitution_standalone.py    # Synonym substitution transformation
-├── visualize_ast_example.py              # AST visualization example
-├── Result_Original/                      # Results from original prompt experiments
-│   ├── HumanEval/                       # HumanEval dataset results
-│   └── OpencodeInstruct/                # OpenCodeInstruct dataset results
-├── Result_Mutation/                      # Results from synonym-substituted prompt experiments
-    ├── HumanEval/                       # HumanEval dataset results
-    └── OpencodeInstruct/                # OpenCodeInstruct dataset results
 
-```
-
-## Features
-
-### Main Script: `logprobs.py`
-
-The main script performs two experiments:
-
-1. **Original Input Experiment**: Generates code from original prompts and evaluates:
-   - Log probabilities and perplexity
-   - Test pass rate
-   - Top log probabilities for each token
-
-2. **Modified Input Experiment**: Applies synonym substitution to prompts, then generates code:
-   - Same metrics as original experiment
-   - Comparison of pass rates between original and modified inputs
-
-### Supporting Modules
-
-- **`calculateLogits.py`**: 
-  - OpenAI API wrapper with logprob support
-  - Log probability extraction utilities
-  - AST-based metrics computation
-  - Visualization functions
-
-- **`evaluate_quixbugs_instance.py`**: 
-  - Code evaluation against test cases
-  - Test execution and result reporting
-  - Code cleaning utilities
-
-- **`synonym_substitution_standalone.py`**: 
-  - Synonym substitution using spaCy and WordNet
-  - Text augmentation for prompt perturbation
+---
 
 ## Installation
 
-1. Install required dependencies:
+From the repo root:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Download spaCy language model:
+Download spaCy model:
+
 ```bash
 python -m spacy download en_core_web_sm
 ```
 
-3. Download NLTK data (WordNet):
-```python
-python -c "import nltk; nltk.download('wordnet')"
-```
-
-4. Set up OpenAI API key:
-   - Create a `.env` file in the project root
-   - Add your OpenAI API key: `OPENAI_API_KEY=your_key_here`
-   - Or set it in `calculateLogits.py` directly (not recommended for production)
-
-## Usage
-
-### Running the Main Analysis
+Download NLTK WordNet data:
 
 ```bash
-python logprobs.py
+python - <<'PY'
+import nltk
+nltk.download("wordnet")
+nltk.download("omw-1.4")
+PY
 ```
 
-This will:
-1. Load the HumanEval dataset
-2. Run 10 iterations of the original input experiment
-3. Run 10 iterations of the synonym-substituted input experiment
-4. Save results to JSON files in `Result_Original/` and `Result_Mutation/`
-5. Display summary statistics comparing both experiments
+Set up OpenAI API credentials via env (recommended):
 
-### Configuration
-
-Edit the configuration variables in `main()` function:
-
-```python
-my_model = "gpt-3.5-turbo-0125"  # Model to use
-MAX_RUN = 10                      # Number of experimental runs
-TOP_LOGPROB = 20                  # Number of top logprobs to retrieve
-TEMPERATURE = 0.3                 # Sampling temperature
+```bash
+export OPENAI_API_KEY=your_key_here
 ```
 
-### Running Individual Components
+---
 
-#### Evaluate a single code instance:
-```python
-from evaluate_quixbugs_instance import evaluate_quixbugs_instance
+## 1. Generating Samples + Logprobs (`logprobs.py`)
 
-code = "def add(a, b): return a + b"
-tests = "assert add(2, 3) == 5"
-result = evaluate_quixbugs_instance(code, tests)
-print(f"Passed: {result.passed}")
+`logprobs.py` is the generator. It:
+
+- Reads a dataset (`--dataset` flag)
+- Calls an OpenAI model with logprobs enabled
+- Optionally applies synonym-substitution fuzzing to the prompt
+- Writes one JSONL row per completion with:
+  - problem metadata
+  - model code
+  - token logprobs
+  - any auxiliary fields needed downstream (tests, categories, etc.)
+
+### Dataset switch
+
+```bash
+--dataset {humaneval, codecontests, bigobench}
 ```
 
-#### Apply synonym substitution:
-```python
-from synonym_substitution_standalone import SynonymSubstitution
+### Example: HumanEval (no fuzzing, 5 completions per problem)
 
-transformer = SynonymSubstitution(seed=42, prob=0.5, max_outputs=1)
-result = transformer.generate("Write a function to calculate the sum")
-print(result[0])
+```bash
+python logprobs.py   --data /home/prateek/mem/memorization_without_execution/datasets/humaneval/human_eval.jsonl   --dataset humaneval   --model gpt-4o   --temperature 0.7   --max-problems 50   --output /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/withoutfuzzing/he_wf.jsonl   --completions-per-problem 5
 ```
 
-#### Extract log probabilities:
-```python
-from calculateLogits import get_completion, extract_logprobs
+You then repeat this command for your fuzzed variants (with the appropriate fuzzing flags inside `logprobs.py`), producing JSONLs such as:
 
-messages = [{"role": "user", "content": "Write a Python function"}]
-response = get_completion(messages, model="gpt-3.5-turbo-0125", logprobs=True, top_logprobs=10)
-logprobs = extract_logprobs(response, "gpt-3.5-turbo-0125")
-print(f"Mean logprob: {np.mean(logprobs)}")
+- `generated_solutions/humaneval/withoutfuzzing/he_wf.jsonl`  (`fuzz0`)
+- `generated_solutions/humaneval/withfuzzing/he_f_0.5.jsonl` (`fuzz0.5`)
+- `generated_solutions/humaneval/withfuzzing/he_f_0.9.jsonl` (`fuzz0.9`)
+
+Analogously for:
+
+- `--dataset codecontests`  → CodeContests runs
+- `--dataset bigobench`     → BigOBench runs
+
+---
+
+## 2. Tagging Public Pass/Fail (`unittests/`)
+
+Once you have JSONL solution files, you tag each solution as **public-pass / public-fail** using the unittest harness.
+
+From the repo root:
+
+```bash
+cd unittests
+TIMEOUT=15 ./run_public_unittests_and_tag.sh   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/withoutfuzzing/he_wf.jsonl   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/withfuzzing/he_f_0.5.jsonl   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/withfuzzing/he_f_0.9.jsonl
 ```
 
-## Output Format
+This script:
 
-Results are saved as JSON files with the following structure:
+- Runs public tests on each solution (with `TIMEOUT` seconds per test)
+- Writes **unit-tested** JSONLs into the target directory, typically:
 
-```json
-{
-  "task_id": "...",
-  "prompt": "...",
-  "test": "...",
-  "mean_log": -2.5,
-  "perplexity": 12.18,
-  "top_logs": [[{"token": "...", "logprob": -1.2}, ...]],
-  "passed": true
-}
+```text
+generated_solutions/humaneval/unittested/
+  ├── unittested_he_wf.jsonl
+  ├── unittested_he_f_0.5.jsonl
+  └── unittested_he_f_0.9.jsonl
 ```
 
-For mutation experiments, an additional field:
-```json
-{
-  "original_input": "...",
-  ...
-}
+Each row is now annotated with at least:
+
+- `status`: `"pass"` / `"fail"` on public tests  
+- `public_unittest_category`: category used for SCTD if `category` is missing
+
+You follow the same pattern for `codecontests` and `bigobench`—just point to the corresponding dataset-specific solution files.
+
+---
+
+## 3. Dynamic Stability Metrics (`dynamic_stability/`)
+
+Metrics are computed in `dynamic_stability` using a unified shell driver and Python scripts.
+
+### 3.1. Scripts
+
+- `calculate_sctd.py` — Static Canonical Trace Divergence (SCTD)
+- `calculate_dctd.py` — Dynamic Canonical Trace Divergence (DCTD)
+- `produce_dynamic_traces.py` — Unified watchdog that dispatches to:
+  - `worker_bigo.py`        (BigOBench-style)
+  - `worker_cc.py`          (CodeContests-style)
+  - `worker_humaneval.py`   (HumanEval-style)
+- `run_fuzz_metrics_unittested.sh` — High-level driver that:
+  - runs SCTD
+  - runs the dynamic tracer
+  - optionally filters dynamic-pass traces
+  - runs DCTD
+  - merges per-fuzz CSVs into study-wide CSVs
+
+From the repo root:
+
+```bash
+cd dynamic_stability
 ```
 
-## Dependencies
+### 3.2. Unified metrics driver: `run_fuzz_metrics_unittested.sh`
 
-See `requirements.txt` for the complete list. Key dependencies include:
-- `openai`: OpenAI API client
-- `datasets`: HuggingFace datasets library
-- `pandas`: Data manipulation
-- `numpy`: Numerical operations
-- `tqdm`: Progress bars
-- `spacy`: NLP processing
-- `nltk`: Natural language toolkit
-- `codebleu`: Code BLEU metric calculation
+Usage:
 
-## Results Analysis
-
-The script automatically analyzes results and displays:
-- Pass rate statistics for each run
-- Comparison between original and modified inputs
-- Run-by-run breakdown of test results
-
-Example output:
-```
-Result: Original Input
-run  passed
-0    True      149
-     False      15
-...
-
-Result: Modified Input - Synonym Substitution
-run  passed
-0    True      152
-     False      12
-...
+```bash
+./run_fuzz_metrics_unittested.sh   <dataset>   <unittested_no_fuzz.jsonl>   <unittested_fuzzA.jsonl>   <unittested_fuzzB.jsonl>   <out_dir>
 ```
 
-## Notes
+Where `<dataset>` ∈ `{bigo, codecontests, humaneval}`.
 
-- The script uses parallel processing via `ThreadPoolExecutor` for faster execution
-- Results are saved incrementally (one file per run)
-- The synonym substitution uses a 50% substitution probability by default
-- Make sure you have sufficient API credits for large-scale experiments
-- Results directories are created automatically if they don't exist
+The **fuzz grid** depends on the dataset:
 
-## License
+- `bigo` / `humaneval`:
+  - labels: `fuzz0`, `fuzz0.5`, `fuzz0.9`
+  - probs:  `0.0`, `0.5`, `0.9`
+- `codecontests`:
+  - labels: `fuzz0`, `fuzz0.3`, `fuzz0.6`
+  - probs:  `0.0`, `0.3`, `0.6`
 
-Please refer to the parent project's license.
+Optional env overrides:
 
-## Citation
+```bash
+TIMEOUT=20       # per-test timeout for dynamic tracing
+WORKERS=4        # watchdog parallelism
+SCTD_SCRIPT=calculate_sctd.py
+DCTD_SCRIPT=calculate_dctd.py
+TRACE_SCRIPT=produce_dynamic_traces.py
+```
 
-If you use this code, please cite the relevant papers:
-- HumanEval dataset: [Chen et al., 2021]
-- ReAPR dataset: ReAPR: Automatic Program Repair via Retrieval-Augmented Large Language Models
+#### Example: HumanEval metrics
+
+```bash
+./run_fuzz_metrics_unittested.sh   humaneval   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested/unittested_he_wf.jsonl   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested/unittested_he_f_0.5.jsonl   /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested/unittested_he_f_0.9.jsonl   /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study
+```
+
+This will create a directory structure like:
+
+```text
+metrics/humaneval/fuzz_study/
+  ├── fuzz0/
+  │   ├── sctd_fuzz0.csv
+  │   └── dctd_fuzz0.csv
+  ├── fuzz0.5/
+  │   ├── sctd_fuzz0.5.csv
+  │   └── dctd_fuzz0.5.csv
+  ├── fuzz0.9/
+  │   ├── sctd_fuzz0.9.csv
+  │   └── dctd_fuzz0.9.csv
+  ├── all_sctd_fuzz_study.csv
+  └── all_dctd_fuzz_study.csv
+```
+
+### 3.3. Dataset-specific behavior (inside `run_fuzz_metrics_unittested.sh`)
+
+- **BigOBench (`bigo`)**
+  - Filters to `status == "pass"` for **public-pass** solutions
+  - Extracts tests per problem into a separate JSONL for the watchdog
+  - Dynamic tracing only on public-pass solutions
+  - Filters dynamic traces to `status == "pass"` before DCTD
+
+- **CodeContests (`codecontests`)**
+  - Tests are embedded in each solution (`private_tests`)
+  - Filters to `status == "pass"` and traces only these
+  - Filters traces to `status == "pass"` before DCTD
+
+- **HumanEval (`humaneval`)**
+  - Extracts `test` + `entry_point` per problem from solutions
+  - Runs dynamic tracing on **all** solutions
+  - Runs DCTD on **all** traces (pass + fail)
+
+---
+
+## 4. Plotting SCTD/DCTD + Logprobs
+
+Once metrics are computed, use `plot_sctd_dctd_and_logprobs_new.py` from the repo root.
+
+### Example: HumanEval fuzz study
+
+```bash
+python plot_sctd_dctd_and_logprobs_new.py   --dataset humaneval   --sctd-csvs     /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study/fuzz0/sctd_fuzz0.csv     /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study/fuzz0.5/sctd_fuzz0.5.csv     /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study/fuzz0.9/sctd_fuzz0.9.csv   --dctd-csvs     /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study/fuzz0/dctd_fuzz0.csv     /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study/fuzz0.5/dctd_fuzz0.5.csv     /home/prateek/mem/memorization_without_execution/metrics/humaneval/fuzz_study/fuzz0.9/dctd_fuzz0.9.csv   --jsonls     /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested/unittested_he_wf.jsonl     /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested/unittested_he_f_0.5.jsonl     /home/prateek/mem/memorization_without_execution/generated_solutions/humaneval/unittested/unittested_he_f_0.9.jsonl   --out-dir     /home/prateek/mem/memorization_without_execution/plots/humaneval_fuzz_study
+```
+
+Flags:
+
+- `--dataset` — one of: `humaneval`, `codecontests`, `bigobench`
+- `--sctd-csvs` — one CSV per fuzz level in **(fuzz0, fuzzA, fuzzB)** order
+- `--dctd-csvs` — same order as SCTD (for datasets where DCTD is computed)
+- `--jsonls` — unit-tested JSONLs in matching fuzz order
+- `--out-dir` — directory where plots and auxiliary CSVs are written
+
+The script produces, per dataset:
+
+- SCTD / DCTD **box-with-points** plots (with per-problem markers)
+- **Delta violin** plots for `fuzz0 − fuzzX`
+- Logprob trajectories (mean, naive entropy, spread via IQR/std)
+- Per-problem logprob spread CSVs and point-ID maps for linking back to `problem_id`
+
+---
+
+## Notes & Extensions
+
+- All scripts expect per-solution JSONL with consistent `problem_id` keys.
+- Fuzzed vs non-fuzzed runs are handled by filenames and argument order; there is no hidden state.
+- To add a new dataset, you would:
+  - extend `logprobs.py` to support `--dataset newdataset`
+  - add a worker / branch in `produce_dynamic_traces.py`
+  - add a small dataset-specific branch in `run_fuzz_metrics_unittested.sh`
+  - optionally extend the plotting script for any dataset-specific quirks
+
+---
+
+## License / Citation
+
+Please refer to the parent project’s license.
+
+If you build on this work, please cite:
+
+- HumanEval: Chen et al., 2021  
+- Any papers where SCTD / DCTD are introduced and described.
+
+---
+
+## Datasets
+
+All JSONL datasets used in this pipeline (HumanEval, CodeContests, BigOBench variants, etc.) are available here:
+
+- Full dataset folder: https://drive.google.com/drive/folders/1kC-65rvDoXFNlagWZzPkl9RqEEhf-u7J?usp=sharing
 
